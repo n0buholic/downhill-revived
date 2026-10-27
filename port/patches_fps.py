@@ -35,6 +35,12 @@ def add(patches):
     edit('0017E440','else obj->x3EC++;',
          'else obj->x3EC+=port_fps_high() ? port_whole_step() : 1;')
 
+    # The rider-selected and shop-flight skip gates are elapsed 60 Hz fields,
+    # not updates: seeking before the camera transition finishes gets reset.
+    for suffix in ('__c62', '__c16'):
+        edit('001EB1D8', 'D_0029DF70%s++;' % suffix,
+             'D_0029DF70%s += port_fps_high() ? port_whole_step() : 1;' % suffix)
+
     # Reset must take place after the original initializer too.
     edit('00238A68', '*(volatile int *)0x10000800 = 0;',
          '*(volatile int *)0x10000800 = 0;\n    if (port_fps_high()) port_clock_reset();')
