@@ -27,7 +27,7 @@ Validation:
   -Iport/render/include -Iport/include -Wno-format`, link `-Wl,--gc-sections -lm`.
 - Launcher tests: five passed, one existing network test ignored. The install test needs
   permission to set executable bits and passes outside the restricted filesystem sandbox.
-- Manual player testing confirms Play → game exit → launcher restore works.
+- Play → game exit → launcher restore was manually tested and works.
   This confirmation does not constitute an exhaustive check of every selection menu.
 
 References consulted (no external code copied):
