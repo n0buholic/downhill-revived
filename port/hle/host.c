@@ -1056,6 +1056,10 @@ void host_settings_load(void)
         }
     }
     setting("DHD_NET_SERVER", OFFICIAL_SERVER);  /* no server set (an empty "server =" sets none) */
+#if defined(__linux__) && !defined(__ANDROID__)
+    /* Linux scheduler/presenter jitter must not keep moving the simulation's deadline. */
+    setting("DHD_LATENCY", "0");
+#endif
 }
 
 /* Whether dhd.ini has a line for key. */

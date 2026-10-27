@@ -16,7 +16,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
-#include <sched.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -379,8 +378,8 @@ void host_sleep_ms(unsigned ms)
     nanosleep(&t, NULL);
 }
 
-/* Until a monotonic-clock time: sleep to a millisecond before it (timer slack
-   is left to the kernel), then a yield-instruction spin. */
+/* Sleep to a millisecond before the deadline, then use a CPU pause, not a
+   scheduler yield that can surrender the remaining frame budget. */
 void host_wait_wall(double seconds)
 {
     double left = seconds - host_wall_seconds();
@@ -392,8 +391,13 @@ void host_wait_wall(double seconds)
         }
         if (t.tv_sec >= 0) nanosleep(&t, NULL);
     }
-    while (host_wall_seconds() < seconds)
-        sched_yield();
+    while (host_wall_seconds() < seconds) {
+#if defined(__x86_64__)
+        _mm_pause();
+#elif defined(__aarch64__)
+        __asm__ volatile("yield");
+#endif
+    }
 }
 
 /* ---- memory protection and access faults (graphics.c, deferred store-image reads) ---- */
