@@ -16,6 +16,12 @@ use std::time::Duration;
 pub const OFFICIAL_SOURCE: &str = "https://api.github.com/repos/skuza-oss/downhill-revived/releases/latest";
 pub const RELEASES_PAGE: &str = "https://github.com/skuza-oss/downhill-revived/releases/latest";
 const WORK_DIR: &str = "dhd-update";
+/// Which release zip this platform installs (DownhillRevived-*-win.zip / -linux.zip): the game's
+/// binaries are not portable between them, so a release's other platform is no update at all.
+#[cfg(target_os = "windows")]
+pub const ASSET_PLATFORM: &str = "win";
+#[cfg(not(target_os = "windows"))]
+pub const ASSET_PLATFORM: &str = "linux";
 /// Never replaced by an update: the player's own files.
 const KEEP: [&str; 4] = ["dhd.ini", "dhd.log", "iso-check.txt", "launcher.log"];
 
@@ -103,8 +109,13 @@ pub fn newer(candidate: &str, current: &str) -> bool {
 }
 
 /// The newest release the source names.
-pub fn latest(source: &str) -> Result<Release, String> {
+pub fn latest(source: &str) -> Result<Option<Release>, String> {
+    let appimage = crate::game::appimage().is_some();
     let body = get_json(source)?;
+    release_from_body(source, &body, appimage)
+}
+
+fn release_from_body(source: &str, body: &serde_json::Value, appimage: bool) -> Result<Option<Release>, String> {
     let mut r = match body.get("assets").and_then(|a| a.as_array()) {
         None => read_manifest(&body, source)?,
         Some(assets) => {
@@ -112,15 +123,21 @@ pub fn latest(source: &str) -> Result<Release, String> {
             let mut zip = None;
             for a in assets {
                 let name = text(a, "name");
-                if name == "latest.json" {
+                if name == if appimage { "latest-linux-appimage.json" }
+                           else if ASSET_PLATFORM == "linux" { "latest-linux.json" }
+                           else { "latest.json" } {
                     manifest = Some(text(a, "browser_download_url"));
-                } else if name.starts_with("DownhillRevived-") && name.ends_with("-win.zip") {
+                } else if name.starts_with("DownhillRevived-") && name.ends_with(
+                    &if appimage { "-x86_64.AppImage".into() } else { format!("-{ASSET_PLATFORM}.zip") }) {
                     zip = Some(a.clone());
                 }
             }
             let mut r = if let Some(m) = manifest {
                 read_manifest(&get_json(&m)?, &m)?
-            } else if let Some(z) = zip.filter(|z| text(z, "digest").starts_with("sha256:")) {
+            } else if let Some(z) = zip {
+                if !text(&z, "digest").starts_with("sha256:") {
+                    return Err("the update asset has no SHA-256 digest".into());
+                }
                 Release {
                     version: text(&body, "tag_name").trim_start_matches(['v', 'V']).to_string(),
                     url: text(&z, "browser_download_url"),
@@ -129,7 +146,7 @@ pub fn latest(source: &str) -> Result<Release, String> {
                     ..Default::default()
                 }
             } else {
-                return Err(format!("the newest release at {source} has no latest.json and no zip with a digest"));
+                return Ok(None);
             };
             r.page = text(&body, "html_url");
             r.notes = text(&body, "body");
@@ -144,7 +161,10 @@ pub fn latest(source: &str) -> Result<Release, String> {
     if r.page.is_empty() {
         r.page = if source == OFFICIAL_SOURCE { RELEASES_PAGE.into() } else { source.into() };
     }
-    Ok(r)
+    if appimage && !r.url.split('?').next().unwrap_or("").ends_with("-x86_64.AppImage") {
+        return Err("the update source does not offer an x86_64 AppImage".into());
+    }
+    Ok(Some(r))
 }
 
 /// Downloads r's zip to dhd-update/ beside the game, calling progress(done, total) as it goes,
@@ -176,6 +196,12 @@ pub fn install(r: &Release, game_dir: &Path, mut progress: impl FnMut(u64, u64))
     let got: String = hash.finalize().iter().map(|b| format!("{b:02x}")).collect();
     if got != r.sha256 {
         return Err(format!("the download is damaged (SHA-256 {got}, expected {})", r.sha256));
+    }
+
+    if let Some(target) = crate::game::appimage() {
+        replace_appimage(&zip_path, &target)?;
+        let _ = fs::remove_dir_all(&work);
+        return Ok(());
     }
 
     let unpacked = work.join("unpacked");
@@ -216,6 +242,30 @@ pub fn install(r: &Release, game_dir: &Path, mut progress: impl FnMut(u64, u64))
     }
 }
 
+/// Stage on the destination filesystem, then atomically replace the running image.
+fn replace_appimage(source: &Path, target: &Path) -> Result<(), String> {
+    let mut header = [0; 11];
+    fs::File::open(source).and_then(|mut f| f.read_exact(&mut header)).map_err(|e| e.to_string())?;
+    if &header[..4] != b"\x7fELF" || &header[8..11] != b"AI\x02" {
+        return Err("the download is not a type-2 AppImage".into());
+    }
+    let staged = target.with_extension(format!("AppImage.update-{}", std::process::id()));
+    let mut output = fs::OpenOptions::new().write(true).create_new(true).open(&staged)
+        .map_err(|e| format!("can't stage {}: {e}", target.display()))?;
+    let result = (|| -> std::io::Result<()> {
+        std::io::copy(&mut fs::File::open(source)?, &mut output)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            output.set_permissions(fs::Permissions::from_mode(0o755))?;
+        }
+        output.sync_all()?;
+        fs::rename(&staged, target)
+    })();
+    if result.is_err() { let _ = fs::remove_file(&staged); }
+    result.map_err(|e| format!("can't replace {}: {e}", target.display()))
+}
+
 fn old_name(p: &Path) -> PathBuf {
     let mut s = p.as_os_str().to_owned();
     s.push(".old");
@@ -239,6 +289,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn replaces_only_a_valid_appimage() {
+        let dir = std::env::temp_dir().join(format!("dhd-appimage-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let image = dir.join("game.AppImage");
+        let source = dir.join("download");
+        fs::write(&image, b"old").unwrap();
+        fs::write(&source, b"not an AppImage").unwrap();
+        assert!(replace_appimage(&source, &image).is_err());
+        assert_eq!(fs::read(&image).unwrap(), b"old");
+        let data = b"\x7fELF\x02\x01\x01\x00AI\x02new payload";
+        fs::write(&source, data).unwrap();
+        replace_appimage(&source, &image).unwrap();
+        assert_eq!(fs::read(&image).unwrap(), data);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(&image).unwrap().permissions().mode() & 0o777, 0o755);
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn missing_platform_is_not_a_failed_check() {
+        let body = serde_json::json!({"assets": [
+            {"name": "latest.json", "browser_download_url": "https://example.invalid/latest.json"},
+            {"name": "DownhillRevived-0.6.4-win.zip"}
+        ]});
+        assert!(release_from_body(OFFICIAL_SOURCE, &body, true).unwrap().is_none());
+        let bad = serde_json::json!({"assets": [{"name": "DownhillRevived-0.6.4-x86_64.AppImage"}]});
+        assert!(release_from_body(OFFICIAL_SOURCE, &bad, true).is_err());
+        assert!(release_from_body(OFFICIAL_SOURCE, &serde_json::json!({}), true).is_err());
+    }
+
+    #[test]
     fn versions() {
         assert!(newer("0.5.1", "0.5.0"));
         assert!(newer("v1.0.0", "0.9.9"));
@@ -257,7 +341,7 @@ mod tests {
     #[test]
     #[ignore]
     fn official_source() {
-        let r = latest(OFFICIAL_SOURCE).unwrap();
+        let Some(r) = latest(OFFICIAL_SOURCE).unwrap() else { return };
         println!("{} {} {} bytes, {} chars of notes", r.version, r.url, r.size, r.notes.len());
         assert!(parse_version(&r.version).is_some());
     }
@@ -273,7 +357,8 @@ mod tests {
         {
             let mut z = zip::ZipWriter::new(Cursor::new(&mut zip_bytes));
             let opt = zip::write::SimpleFileOptions::default();
-            for (name, body) in [("dhd.exe", "new game"), ("README.txt", "new readme"), ("dhd.ini", "name = WRONG\n")] {
+            let exe = crate::game::GAME_EXE;
+            for (name, body) in [(exe, "new game"), ("README.txt", "new readme"), ("dhd.ini", "name = WRONG\n")] {
                 z.start_file(format!("DownhillRevived-9.9.9/{name}"), opt).unwrap();
                 z.write_all(body.as_bytes()).unwrap();
             }
@@ -305,16 +390,16 @@ mod tests {
         let game = std::env::temp_dir().join(format!("dhd-launcher-update-{}", std::process::id()));
         let _ = fs::remove_dir_all(&game);
         fs::create_dir_all(&game).unwrap();
-        fs::write(game.join("dhd.exe"), "old game").unwrap();
+        fs::write(game.join(crate::game::GAME_EXE), "old game").unwrap();
         fs::write(game.join("dhd.ini"), "name = SKUZA\n").unwrap();
 
-        let r = latest(&format!("{base}/latest.json")).unwrap();
+        let r = latest(&format!("{base}/latest.json")).unwrap().unwrap();
         assert_eq!(r.version, "9.9.9");
         assert!(newer(&r.version, "0.5.0"));
         let mut last = 0;
         install(&r, &game, |done, _| last = done).unwrap();
         assert_eq!(last, r.size);
-        assert_eq!(fs::read_to_string(game.join("dhd.exe")).unwrap(), "new game");
+        assert_eq!(fs::read_to_string(game.join(crate::game::GAME_EXE)).unwrap(), "new game");
         assert_eq!(fs::read_to_string(game.join("README.txt")).unwrap(), "new readme");
         assert_eq!(fs::read_to_string(game.join("dhd.ini")).unwrap(), "name = SKUZA\n");
         assert!(!game.join(WORK_DIR).exists());

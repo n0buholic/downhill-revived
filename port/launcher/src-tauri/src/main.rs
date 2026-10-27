@@ -53,7 +53,7 @@ struct ServerStatus {
 
 #[derive(Serialize)]
 struct UpdateCheck {
-    release: update::Release,
+    release: Option<update::Release>,
     newer: bool,
 }
 
@@ -111,7 +111,7 @@ async fn check_update(app: State<'_, App>) -> Result<UpdateCheck, String> {
     let release = tauri::async_runtime::spawn_blocking(move || update::latest(&source))
         .await
         .map_err(|e| e.to_string())??;
-    let newer = update::newer(&release.version, VERSION);
+    let newer = release.as_ref().is_some_and(|r| update::newer(&r.version, VERSION));
     Ok(UpdateCheck { release, newer })
 }
 
@@ -131,7 +131,7 @@ async fn install_update(handle: AppHandle, release: update::Release) -> Result<(
     })
     .await
     .map_err(|e| e.to_string())??;
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let exe = game::appimage().map(Ok).unwrap_or_else(std::env::current_exe).map_err(|e| e.to_string())?;
     std::process::Command::new(exe).spawn().map_err(|e| format!("updated, but can't restart: {e}"))?;
     handle.exit(0);
     Ok(())
@@ -247,6 +247,9 @@ fn main() {
         std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
     }
     let dir = game::dir();
+    if game::appimage().is_some() {
+        std::fs::create_dir_all(&dir).expect("create player data folder");
+    }
     update::clean_up(&dir);
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())

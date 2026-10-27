@@ -454,6 +454,10 @@ function renderFooter() {
         status('', null, 'Version ', v, '. Update checks are off.');
         setPrimary(playNow);
         break;
+      case 'unavailable':
+        status('', null, 'Version ', v, '. No update package is published for this platform yet.');
+        setPrimary(playNow);
+        break;
       case 'failed':
         status('bad', 'i-alert', `Couldn't check for updates. You can still play ${state.version}.`);
         setSecondary([icon('i-retry'), 'Retry'], checkUpdate);
@@ -512,7 +516,7 @@ async function checkUpdate() {
     state.update = await invoke('check_update');
     renderNotes();
     renderHome();
-    state.check = state.update.newer ? 'available' : 'current';
+    state.check = !state.update.release ? 'unavailable' : state.update.newer ? 'available' : 'current';
     renderFooter();
     if (state.update.newer && get('auto_update') === 'on') installUpdate();
   } catch (e) {
