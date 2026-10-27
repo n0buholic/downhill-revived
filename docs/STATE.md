@@ -90,7 +90,28 @@ it unchanged (finding 088, CL3).
   (`--renderer rust` is still accepted; the JS/WebGPU renderer `www/gpu.js` is gone, finding 088
   CL5). Speed toward 60 fps: finding 087. Its PC SETTINGS (finding 087 WO1): resolution 1x-8x
   (applied at once), scaling, widescreen, font, frame rate (60-144 paced to the core's period).
-- Linux headless x64 (`build_host64_linux.py`, WSL, `DHD_HEADLESS=1`): for state traces only.
+- Linux x64 (`build_host64_linux.py`, a Linux or WSL host): headless for state traces
+  (`DHD_HEADLESS=1`) and, with a window and the renderer, the native Linux game (finding 098):
+  SDL3 static (`sdl3.py --linux`, X11 + Wayland), the Rust renderer on Vulkan through the
+  Xlib/Wayland surface kinds (`DHDR_WINDOW_XLIB`/`_WAYLAND`), SDL audio out, the POSIX net.
+  Runs end to end on Wayland (RTX 3050): disc, title, menus, movie, PC settings, in-game
+  rendering. Finding 099 uses clock-paced VBLANK by default on Linux to prevent JIT deadline
+  drift, uses CPU pauses for the final deadline wait, and shows the Wayland window on its SDL
+  thread. Game/launcher icons reuse the Windows artwork.
+  Finding 100 requests compositor fullscreen on Linux, explicitly restores the launcher
+  after game exit, and makes movies/loading cards follow the selected picture aspect.
+  Finding 101 fixes early Rider Selected skip at high FPS: the skip delay now follows
+  elapsed game fields, preventing the active animation blend from resetting the seek.
+  Early/late Cross regression runs pass at 60 and 240 FPS.
+  Known open items: a rare early-boot SIGSEGV in the game thread (not seen under gdb), X11
+  surfaces that offer only BGRA.
+  Finding 102 packages the launcher/game as one AppImage with the Windows icon,
+  persistent XDG player data, and atomic AppImage updates.
+- Launcher (finding 093, 098): `port/launcher`, the Tauri window players see before the game.
+  One codebase builds both platforms (`port/tools/build_launcher.py`): the Windows
+  `DownhillRevived.exe` in the release zip and a Linux `DownhillRevived` built the same way;
+  updates follow the package format (Windows zip, Linux AppImage or legacy Linux zip).
+  A release without the platform's package is reported as unavailable, not a failed check.
 - Android arm64 (finding 091): `build_host64_android.py` makes `libmain.so` (wasm2c core, the
   POSIX host on arm64, the Rust renderer on Vulkan, SDL3 as `libSDL3.so`) and
   `port/android/build_apk.py` a debug-signed APK with Gradle (no Android Studio). On the Mi 11i:

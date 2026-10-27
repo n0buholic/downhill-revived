@@ -67,7 +67,7 @@ This takes about 15 seconds and writes `asm/` and `assets/` (about 37 MB) from y
 
 ## 3. Build the PC port
 
-The PC game is the 64-bit Windows `dhd.exe` and the browser build. Both are made from one
+The PC game has Windows x64, Linux x64 and browser builds. All are made from one
 portable game core, a wasm32 module (`build/wasm/dhd_core.wasm`). The 32-bit build is retired: its
 last source is the tag `v0.3.1`.
 
@@ -93,6 +93,43 @@ into `build/host64-exe/`.
 
 To run a build, copy `dhd.exe` (with `dxcompiler.dll`) to a folder of its own and start it. It
 asks for your `.iso` the first time. `DHD_ISO=<path to iso>` in the environment skips the question.
+
+### Linux AppImage
+
+Build on the oldest Linux distribution you intend to support. Tauri requires GTK3 and
+WebKitGTK 4.1 development packages, Node.js/npm, and the Rust version in the launcher manifest.
+The native game also needs Clang/LLVM, CMake, SDL3 build dependencies and the Vulkan loader
+at runtime. Point `WASI_SYSROOT`, `WABT_DIR`, and `SIMDE_DIR` at your installed toolchains
+(wasi-sdk 34, WABT 1.0.42 and SIMDe). No username or installation directory is built in.
+
+From the repository root:
+
+```sh
+python3 port/tools/build_wasm.py
+DHD_SOUND=sdl python3 port/tools/build_host64_linux.py build/wasm/dhd_core.wasm \
+    --wabt "$WABT_DIR" --simde "$SIMDE_DIR" --num-outputs 6
+(cd port/launcher && npm ci)
+python3 port/tools/package_appimage.py
+```
+
+The last step builds the launcher and uses Tauri/linuxdeploy to bundle it, `dhd`, the Windows
+icon artwork and supporting libraries into `build/release/DownhillRevived-<version>-x86_64.AppImage`.
+Packaging tools are downloaded on the first run. It creates no desktop shortcut or separate
+icon for the player. The ISO is never included; choose your own USA disc image in the launcher.
+The SHA-256 file and `latest-linux-appimage.json` beside the build are release metadata,
+not additional runtime files.
+
+AppImage settings, saves, texture packs and the game log live in
+`$XDG_DATA_HOME/downhill-revived` (default `~/.local/share/downhill-revived`). To migrate from
+the loose Linux build, copy its `dhd.ini`, `saves/` and any `textures/` folder there. Relative
+ISO/texture-pack paths should be made absolute when moving the settings. `DHD_GAME_DIR`
+overrides the player-data directory; `DHD_SETTINGS` and `DHD_MEMCARD_DIR` overrides remain
+available. Replacing the AppImage preserves these files. AppImage updates select the Linux
+AppImage manifest/asset and replace the image after verifying its SHA-256.
+
+A build made on a newer distribution still requires that distribution's minimum glibc
+version; bundling does not make it compatible with older glibc. Verify releases on each
+supported distribution before publishing.
 
 ### Tools outside the checkout
 
