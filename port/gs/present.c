@@ -14,6 +14,9 @@
 #include <SDL3/SDL.h>
 #define PRESENT_SDL 1
 #endif
+#if defined(DHD_HAVE_SDL) && defined(__linux__) && !defined(__ANDROID__)
+#include "dhd_icon.inc"  /* generated from port/res/icon.png, the Windows icon's source */
+#endif
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -34,7 +37,7 @@ static SDL_Window *sdl_window;
 /* The window lives on the SDL thread (sdl_host.c): its messages and a modal drag or resize stop
    that thread only; the game thread still draws and presents to the window, and still ends the
    process when the window closes (gs_pump_messages). */
-typedef struct { int x, y, w, h, borderless; } WindowSpec;
+typedef struct { int x, y, w, h, borderless, fullscreen; } WindowSpec;
 static void display_of(SDL_Window *w, SDL_Rect *full, SDL_Rect *usable);
 
 /* The primary display's resolution: its desktop mode, the one Windows runs it at (the largest
@@ -80,6 +83,9 @@ static void monitor_size(WindowSpec *s)
 static void make_window(void *arg)
 {
     WindowSpec *s = arg;
+#if defined(__linux__) && !defined(__ANDROID__)
+    SDL_SetHint(SDL_HINT_APP_ID, "app.skuza.downhillrevived");
+#endif
     if (!SDL_InitSubSystem(SDL_INIT_VIDEO)) {
         fprintf(stderr, "gs: SDL video did not start (%s)\n", SDL_GetError());
         return;
@@ -91,6 +97,7 @@ static void make_window(void *arg)
         s->x = full.x, s->y = full.y, s->w = full.w, s->h = full.h;
     }
     SDL_WindowFlags flags = SDL_WINDOW_HIDDEN | (s->borderless ? SDL_WINDOW_BORDERLESS : SDL_WINDOW_RESIZABLE);
+    if (s->fullscreen) flags |= SDL_WINDOW_FULLSCREEN;
     /* A minimised start: SDL applies its window state when the window shows, so it must know
        (show_window); otherwise it restores the window then. */
     if (start_minimised()) flags |= SDL_WINDOW_MINIMIZED;
@@ -102,6 +109,13 @@ static void make_window(void *arg)
         fprintf(stderr, "gs: SDL window (%s)\n", SDL_GetError());
         return;
     }
+#if defined(__linux__) && !defined(__ANDROID__)
+    SDL_Surface *icon = SDL_LoadPNG_IO(SDL_IOFromConstMem(dhd_icon_png, sizeof dhd_icon_png), true);
+    if (icon) {
+        SDL_SetWindowIcon(sdl_window, icon);
+        SDL_DestroySurface(icon);
+    }
+#endif
     if (s->borderless) SDL_SetWindowPosition(sdl_window, s->x, s->y);
     hle_log("gs: SDL window %dx%d (video %s)\n", s->w, s->h, SDL_GetCurrentVideoDriver());
 }
@@ -241,44 +255,69 @@ static void android_background(void)
     hle_log("gs: back in the foreground\n");
 }
 #elif defined(PRESENT_SDL)
-/* No presentation device on this host (Linux: the renderer has no surface here yet). The SDL
-   window still opens for input, and audio still plays; rendering stays headless, so init reports
-   no device and gs_vsync keeps its bench path. */
+static void show_linux_window(void *unused)
+{
+    (void)unused;
+    SDL_ShowWindow(sdl_window);
+    if (start_minimised()) SDL_MinimizeWindow(sdl_window);
+    else SDL_RaiseWindow(sdl_window);
+}
+
+/* Linux: the full window (SDL chooses the session's back end, Wayland or X11): the renderer
+   (gpu_rust.c: wgpu on Vulkan) and its surface on the SDL window, the window shown once both
+   run (as _WIN32 above, without the OS icon and DPI calls). Headless runs still never open. */
 static int init(void)
 {
-    const char *width = getenv("DHD_WINDOW_WIDTH"), *height = getenv("DHD_WINDOW_HEIGHT");
+    host_dpi_aware();
+    const char *mode = getenv("DHD_WINDOW"), *width = getenv("DHD_WINDOW_WIDTH"), *height = getenv("DHD_WINDOW_HEIGHT");
+    int fullscreen = mode && !strcmp(mode, "fullscreen");
+    int borderless = fullscreen || (mode && !strcmp(mode, "borderless"));
     WindowSpec spec = {0, 0, width && atoi(width) > 0 ? atoi(width) : 896,
-                       height && atoi(height) > 0 ? atoi(height) : 672, 0};
+                       height && atoi(height) > 0 ? atoi(height) : 672, borderless, fullscreen};
     if (getenv("DHD_HEADLESS")) return 0;  /* headless runs never open a window */
     sdl_host_run(make_window, &spec);  /* on the SDL thread: the window's messages are its queue's */
     if (!sdl_window) return 0;
-    SDL_ShowWindow(sdl_window);
-    hle_log("gs: no renderer on this host yet (headless scanout)\n");
-    return 0;  /* no renderer: gs_vsync stays disabled */
+    splash_step(75, "Preparing the graphics...");
+    if (!gs_gpu_init(&gs)) return 0;
+    if (!gs_gpu_surface(&gs, sdl_window)) {
+        hle_log("gs: the renderer has no surface on the window\n");
+        gs_gpu_destroy(&gs);
+        return 0;
+    }
+    surface = 1;
+    hle_log("gs: WebGPU presentation (%s)\n", gs_gpu_backend_name(&gs));
+    /* A minimised start (splash.c's start_minimised: test and recording runs) shows small here. */
+    sdl_host_run(show_linux_window, NULL);
+    splash_close();
+    return 1;
 }
 #else
 /* No presentation device: init fails, so gs_vsync stays disabled (bench only). */
 static int init(void) { return 0; }
 #endif
 
-/* The PC settings page changed DHD_WINDOW, DHD_WINDOW_WIDTH or DHD_WINDOW_HEIGHT: the window
-   mode and size now, as init sets them up (fullscreen is the whole monitor, borderless). EE thread
-   (it owns the window, so the messages these calls send are handled at once). The renderer's
-   surface follows at the next present (WM_SIZE). */
-#ifdef _WIN32
-void gs_window_apply(void)
+/* Apply PC settings on the SDL thread that owns the window. The renderer follows its resize. */
+#ifdef PRESENT_SDL
+static void window_apply(void *unused)
 {
+    (void)unused;
     if (!sdl_window || !surface) return;
     const char *mode = getenv("DHD_WINDOW"), *width = getenv("DHD_WINDOW_WIDTH"), *height = getenv("DHD_WINDOW_HEIGHT");
     int borderless = mode && !strcmp(mode, "borderless"), fullscreen = mode && !strcmp(mode, "fullscreen");
+#if defined(__linux__) && !defined(__ANDROID__)
+    SDL_SetWindowFullscreen(sdl_window, fullscreen);
+    if (fullscreen) {
+        resize_pending = 1;
+        return;
+    }
+#endif
     SDL_Rect monitor, usable;
     display_of(sdl_window, &monitor, &usable);
-    /* The window's own calls, from this thread as before (the SDL thread gets its messages). */
     if (borderless || fullscreen) {
         SDL_SetWindowBordered(sdl_window, false);
         SDL_SetWindowSize(sdl_window, monitor.w, monitor.h);
         SDL_SetWindowPosition(sdl_window, monitor.x, monitor.y);
-        if (!IsIconic(window)) SDL_ShowWindow(sdl_window);  /* a minimised start stays so */
+        if (!(SDL_GetWindowFlags(sdl_window) & SDL_WINDOW_MINIMIZED)) SDL_ShowWindow(sdl_window);
     } else {
         int w = width && atoi(width) > 0 ? atoi(width) : 896, h = height && atoi(height) > 0 ? atoi(height) : 672;
         SDL_SetWindowBordered(sdl_window, true);
@@ -288,10 +327,11 @@ void gs_window_apply(void)
         int outer_w = w + left + right, outer_h = h + top + bottom;  /* centred on the usable area */
         int x = usable.x + (usable.w - outer_w) / 2, y = usable.y + (usable.h - outer_h) / 2;
         SDL_SetWindowPosition(sdl_window, x > usable.x ? x : usable.x, y > usable.y ? y : usable.y);
-        if (!IsIconic(window)) SDL_ShowWindow(sdl_window);
+        if (!(SDL_GetWindowFlags(sdl_window) & SDL_WINDOW_MINIMIZED)) SDL_ShowWindow(sdl_window);
     }
     resize_pending = 1;
 }
+void gs_window_apply(void) { if (sdl_window && surface) sdl_host_run(window_apply, NULL); }
 #else
 void gs_window_apply(void) {}
 #endif
@@ -299,7 +339,7 @@ void gs_window_apply(void) {}
 /* The picture's filter and shape changed (DHD_PRESENT_FILTER, DHD_ASPECT): native renderer only. */
 void gs_present_options_apply(void)
 {
-#if defined(_WIN32) || (defined(__ANDROID__) && defined(PRESENT_SDL))
+#if defined(PRESENT_SDL) || defined(_WIN32)
     if (sdl_window && gs_gpu_native(&gs)) gs_native_present_options(&gs);
 #endif
 }

@@ -441,7 +441,7 @@ def image_stage(wanted):
     aliases = {}
     for m in re.finditer(r'/alternatename:(\w+)=(\w+)', symbols_s):
         aliases[m.group(1)] = m.group(2)
-    p = run(['clang', '--target=i686-pc-windows-itanium', '-c', paths[0], '-o', paths[0] + '.o'])
+    p = run([os.environ.get('DHD_COFF_CLANG', 'clang'), '--target=i686-pc-windows-itanium', '-c', paths[0], '-o', paths[0] + '.o'])
     if p.returncode:
         sys.exit(p.stderr)
     image_obj = paths[0] + '.o'

@@ -1,0 +1,4 @@
+# rustc --print native-static-libs for the x86_64-unknown-linux-gnu static library (finding 098,
+# rustc 1.97.1, wgpu 29.0.3 with dx12+vulkan+wgsl; DX12 too is never used on this target). The
+# allow-list for rustgs.py / check_rust_lib.py.
+-ldl -lgcc_s -lutil -lrt -lpthread -lm -lc

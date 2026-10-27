@@ -1,16 +1,13 @@
-"""Build a wasm2c module and the native Linux host as dhd64 (headless ELF).
+"""Build a wasm2c module and the native Linux host as dhd64.
 
 Accepts .wasm or WABT .c units (module name must be core). The module is the
 same portable core the Windows x64 build uses; the host is the POSIX
-backend (port/host/host_posix.c, the null sound and GPU backends, POSIX
-threads everywhere). No force-link or missing stubs. All generated C is
+backend (port/host/host_posix.c, POSIX threads). No force-link or missing stubs. All generated C is
 prepared before compilation; all output stays in build/.
 
-With --sdl-lib (and DHD_SOUND=sdl for the SDL audio backend) the SDL window, input and audio are wired in like the Windows
-build (build_host64.py --sdl-lib, port/tools/sdl3.py --linux): the window
-opens for input, sound plays, and rendering stays headless (no D3D11 on
-Linux; no Linux renderer yet). Without it the null
-sound backend is linked and no window opens. Run it through
+With --sdl-lib the SDL window, input, audio and Vulkan renderer are enabled.
+DHD_SOUND=sdl also enables SDL automatically; DHD_SOUND=null disables audio.
+Without SDL, the null sound/GPU backends are linked and no window opens. Run it through
 port/tools/state_trace_run.py --linux.
 """
 import argparse
@@ -68,10 +65,9 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     if str(out).startswith('/mnt/c/'):
         p.error('build output must stay off C:')
-    # The sound output: the null backend, or SDL3's audio stream with DHD_SOUND=sdl at
-    # build time. SDL audio implies the SDL window/input,
-    # like build_host64.py's --sdl-lib does on Windows.
-    sdl_sound = os.environ.get('DHD_SOUND') == 'sdl'
+    # The sound output: the null backend, or SDL3's audio stream. SDL audio is the default
+    # whenever a window is enabled, like build_host64.py does on Windows.
+    sdl_sound = {'sdl': True, 'null': False}.get(os.environ.get('DHD_SOUND'), a.sdl_lib is not None)
     sdl_lib, sdl_include, sdl_libs = a.sdl_lib, a.sdl_include, a.sdl_libs
     if sdl_sound and sdl_lib is None:
         from sdl3 import linux_build
@@ -90,6 +86,10 @@ def main():
     host_units = [u.replace('port/host/__sound__', sound) for u in HOST_UNITS]
     if sdl:
         host_units.insert(2, 'port/host/sdl_host.c')  # the SDL thread, with the sound unit
+        # the Rust renderer replaces the null GPU backend (finding 098): its surface sits on
+        # the SDL window (X11 or Wayland), headless runs keep working through DHD_HEADLESS
+        host_units[host_units.index('port/gs/gpu_null.c')] = 'port/gs/gpu_rust.c'
+        host_units.insert(host_units.index('port/gs/texpack_linux.c') + 1, 'port/gs/font_sharp.c')
     env = dict(os.environ, TMPDIR=str(out / 'tmp'))
     (out / 'tmp').mkdir(exist_ok=True)
     commands = []
@@ -110,6 +110,8 @@ def main():
     check_launcher_exports(exports)
     prepare_units(units, out)
     common = ['clang', '-c', '-O2', '-march=x86-64-v2', '-fPIC',
+              '-ffile-prefix-map=' + str(Path.home()) + '=home',
+              '-ffile-prefix-map=' + str(ROOT) + '=.',
               '-ffp-model=strict', '-ffp-contract=off',
               # wasm-rt.h defaults Linux to guard-page checks, which our mirror allocator
               # replaces: keep every generated OOB access a trapping check (finding 082).
@@ -129,9 +131,10 @@ def main():
               '-I' + str(a.simde)]
     objdir = out / 'obj'
     objdir.mkdir(exist_ok=True)
-    # The units that include SDL3's headers (host64_census.SDL_UNITS).
+    # The units that include SDL3's headers (host64_census.SDL_UNITS); gpu_rust.c too, for the
+    # window's back end (gs_gpu_surface).
     sdl_units = ('port/hle/gamepad.c', 'port/hle/text_input.c', 'port/gs/present.c',
-                 'port/host/sdl_host.c', 'port/host/sound_out_sdl.c')
+                 'port/gs/gpu_rust.c', 'port/host/sdl_host.c', 'port/host/sound_out_sdl.c')
 
     # VU1's straight-line blocks as C (vu1_aot.inc and vu1_native_clip.inc, from the game's
     # .vutext: DHD_VUTEXT or assets/vutext.bin); vu0_interp.c runs them
@@ -139,6 +142,10 @@ def main():
     gen = out / 'gen'
     gen.mkdir(exist_ok=True)
     vu1_aot.generate(gen / 'vu1_aot.inc')
+    if sdl:
+        icon = (ROOT / 'port/res/icon.png').read_bytes()
+        (gen / 'dhd_icon.inc').write_text('static const unsigned char dhd_icon_png[] = {' +
+                                        ','.join(map(str, icon)) + '};\n')
 
     def compile_one(source):
         source = Path(source)
@@ -146,18 +153,21 @@ def main():
         extra = ['-I' + str(gen)] if rel.startswith('port/') else []
         if sdl and rel in sdl_units:  # the SDL3 headers (sdl3.py)
             extra += ['-DDHD_HAVE_SDL', '-I' + str(Path(sdl_include).resolve())]
+        if rel.endswith('gs/gpu_rust.c'):
+            extra += ['-I' + str(ROOT / 'port/render/include')]  # dhd_render.h
         if rel.endswith('vu0_interp.c'):
             extra += ['-DPS2_VU_AOT']
         if 'libmpeg2/' in rel:
             extra += ['-I' + str(ROOT / 'port/third_party/libmpeg2')]
         obj = objdir / (rel.replace('/', '_') + '.o')
-        run(common + extra + [str(source), '-o', str(obj)], timeout=900)
+        run(common + extra + [str(source), '-o', str(obj)], timeout=1800)
         return obj
 
     try:
         with ThreadPoolExecutor(a.jobs) as pool:
             host_objects = list(pool.map(compile_one, [ROOT / u for u in host_units]))
         library = out / 'libhost64.a'
+        run(['rm', '-f', str(library)])  # 'ar r' keeps stale members from an earlier sound unit
         run(['ar', 'rcs', str(library), *[str(o) for o in host_objects]])
         objects = []
         glue = [rt / 'wasm-rt-impl.c', out / 'imports_gen.c'] + [SOURCE / n for n in
@@ -165,10 +175,22 @@ def main():
                  'diagnostics.c', 'launcher.c')]
         with ThreadPoolExecutor(a.jobs) as pool:
             objects = list(pool.map(compile_one, units + glue))
-        sdl_inputs = [str(sdl_lib)] + list(sdl_libs) if sdl else []
+        link = [str(x) for x in objects + [library]]
+        rust_inputs = []
+        if sdl:
+            import rustgs  # cargo through rustgs only (its flags, version gate, checks and cache)
+            try:
+                report = rustgs.build(rustgs.LINUX)
+            except rustgs.Refused as why:
+                raise RuntimeError('rustgs: refused: %s' % why)
+            # rustc's list for the static library (checked by rustgs against
+            # port/render/native-static-libs-x86_64-unknown-linux-gnu.txt)
+            link.append(report['lib'])
+            rust_inputs = [x for x in report['native_static_libs'] if x not in ('-lc',)]
+        sdl_inputs = [os.path.abspath(str(sdl_lib))] + list(sdl_libs) if sdl else []
         run(['clang', '-O2', '-march=x86-64-v2', '-pthread', '-rdynamic',
              '-Wl,--gc-sections',
-             *[str(o) for o in objects], str(library), *sdl_inputs,
+             *link, *sdl_inputs, *rust_inputs,
              '-o', str(out / 'dhd64'), '-ldl', '-lm'])
         (out / 'failure.log').unlink(missing_ok=True)
         print(f'PASS: {len(rows)} generated imports; {len(host_objects)} Linux host objects'

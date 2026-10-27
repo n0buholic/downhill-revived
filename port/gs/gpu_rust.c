@@ -33,6 +33,9 @@
 #include <dxgi.h>
 #else
 #include "../host/win32_compat.h"  /* QueryPerformanceCounter and friends */
+#ifdef DHD_HAVE_SDL
+#include <SDL3/SDL.h>             /* the window's Wayland/X11 handles (gs_gpu_surface) */
+#endif
 #endif
 #include <stdio.h>
 #include <stdlib.h>
@@ -188,7 +191,8 @@ static int device_init(void)
     if (dual && !atoi(dual)) d.flags |= DHDR_DEV_NO_DUAL_SOURCE;
     d.log_level = getenv("DHD_WGPU_DEBUG") ? DHDR_LOG_WARN : DHDR_LOG_ERROR;
 #ifndef _WIN32
-    /* Android: Vulkan, wgpu's high-performance adapter (the only one) */
+    /* Android: Vulkan, wgpu's high-performance adapter (the only one). Linux (DHD_HAVE_SDL):
+       Vulkan too, the high-performance adapter (wgpu's pick between the platforms' devices). */
     (void)compiler; (void)choice;
     d.flags |= DHDR_DEV_VULKAN;
     if (!dhdr_device_init(&d)) return 0;
@@ -364,6 +368,21 @@ int gs_gpu_surface(Gs *g, void *window)
     w.kind = DHDR_WINDOW_WIN32;
     w.a = (uint64_t)(uintptr_t)window;
     w.b = (uint64_t)(uintptr_t)GetModuleHandleA(NULL);
+#elif defined(DHD_HAVE_SDL)
+    /* Linux: the window SDL made, on the session's own backend (SDL picks it): Wayland's
+       wl_surface + wl_display, else X11's Window + Display* (SDL_PROP_WINDOW_*). */
+    SDL_PropertiesID props = SDL_GetWindowProperties((SDL_Window *)window);
+    void *wsurface = SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER, NULL);
+    void *wdisplay = SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WAYLAND_DISPLAY_POINTER, NULL);
+    if (wsurface && wdisplay) {
+        w.kind = DHDR_WINDOW_WAYLAND;
+        w.a = (uint64_t)(uintptr_t)wsurface;
+        w.b = (uint64_t)(uintptr_t)wdisplay;
+    } else {
+        w.kind = DHDR_WINDOW_XLIB;
+        w.a = (uint64_t)SDL_GetNumberProperty(props, SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0);
+        w.b = (uint64_t)(uintptr_t)SDL_GetPointerProperty(props, SDL_PROP_WINDOW_X11_DISPLAY_POINTER, NULL);
+    }
 #else
     w.kind = DHDR_WINDOW_ANDROID;
     w.a = (uint64_t)(uintptr_t)window;

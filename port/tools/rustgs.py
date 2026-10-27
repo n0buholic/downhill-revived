@@ -95,7 +95,8 @@ WEB_OUT = ROOT / 'build' / 'web' / 'renderer'
 X64 = 'x86_64-pc-windows-msvc'
 WASM = 'wasm32-unknown-unknown'
 ANDROID = 'aarch64-linux-android'  # the Android build (build_host64_android.py, finding 091)
-TARGETS = (X64, WASM, ANDROID)   # i686 is retired
+LINUX = 'x86_64-unknown-linux-gnu'  # the Linux host build (build_host64_linux.py, finding 098)
+TARGETS = (X64, WASM, ANDROID, LINUX)   # i686 is retired
 PROFILES = ('release', 'fixloop')
 FEATURES = ('test-hooks',)       # what a caller may add; native / web are rustgs's own
 REFUSED_FEATURES = ('no-fp-guard',)
@@ -137,6 +138,8 @@ def log(msg):
 def home(var):
     value = os.environ.get(var)
     if not value:
+        if os.name != 'nt':  # a Linux host has the toolchain where it lives (default paths are fine)
+            return ''
         refuse('%s is not set (the Rust toolchain must live off the C: drive)' % var)
     path = os.path.normpath(value)
     if os.path.splitdrive(path)[0].upper() == 'C:':
@@ -154,7 +157,11 @@ def rustflags(triple):
     if triple.endswith('-msvc'):
         flags.append('-Ctarget-feature=+crt-static')
     for var, name in (('CARGO_HOME', 'cargo'), ('RUSTUP_HOME', 'rustup')):
-        for s in spellings(home(var)):
+        if var not in os.environ and os.name != 'nt':
+            value = os.path.expanduser('~/.cargo' if var == 'CARGO_HOME' else '~/.rustup')
+        else:
+            value = home(var)
+        for s in spellings(value):
             flags.append('--remap-path-prefix=%s=%s' % (s, name))
     if triple == WASM:
         flags += ['-Clink-arg=' + a for a in WASM_LINK_ARGS]
@@ -555,7 +562,8 @@ def build(triple, features=(), profile='release', no_cache=False):
     tdir.mkdir(parents=True, exist_ok=True)
     tag = '+'.join(features) or 'default'
     out_dir = WEB_OUT if triple == WASM else tdir / 'rustgs' / triple / profile / tag
-    lib_name = 'dhd_render_bg.wasm' if triple == WASM else 'libdhd_render.a' if triple == ANDROID else 'dhd_render.lib'
+    lib_name = ('dhd_render_bg.wasm' if triple == WASM else 'libdhd_render.a'
+                if triple in (ANDROID, LINUX) else 'dhd_render.lib')
     rep = {'triple': triple, 'profile': profile, 'features': features, 'key': key, 'rustflags': flags,
            'target_dir': str(tdir), 'versions': versions}
     hit = None if no_cache else cache_fetch(key, out_dir)
@@ -579,7 +587,7 @@ def build(triple, features=(), profile='release', no_cache=False):
         raise SystemExit('rustgs: cargo failed (exit %d)' % r.returncode)
     built_dir = tdir / triple / profile
     raw = built_dir / ('dhd_render.wasm' if triple == WASM else lib_name)
-    inputs_gate(built_dir / ('libdhd_render.d' if triple == ANDROID else 'dhd_render.d'))
+    inputs_gate(built_dir / ('libdhd_render.d' if triple in (ANDROID, LINUX) else 'dhd_render.d'))
     sysroot = Path(tool_version(['rustc', '--print', 'sysroot'], env).strip()) / 'lib' / 'rustlib' / triple / 'lib'
     native_libs = []
     if triple != WASM:
@@ -631,7 +639,8 @@ def build(triple, features=(), profile='release', no_cache=False):
 
 def library(target=X64, features=(), profile='release'):
     """The built library's path (for link scripts; A1c). 'x64' / 'wasm' are accepted for the triple."""
-    triple = {'x64': X64, 'x86_64': X64, 'wasm': WASM, 'wasm32': WASM, 'android': ANDROID}.get(target, target)
+    triple = {'x64': X64, 'x86_64': X64, 'wasm': WASM, 'wasm32': WASM, 'android': ANDROID,
+              'linux': LINUX}.get(target, target)
     return Path(build(triple, features, profile)['lib'])
 
 

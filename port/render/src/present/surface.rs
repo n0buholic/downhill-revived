@@ -3,8 +3,8 @@
 //!
 //! As the retired `gpu_wgpu.c`'s wgpu_surface / surface_configure / wgpu_present (last at
 //! render/rust 3882d5576): a surface on the window
-//! (`DHDR_WINDOW_WIN32`: a = HWND, b = HINSTANCE; kinds 3-6 refused by `ffi.rs`), RGBA8Unorm
-//! required; present mode Immediate > Mailbox > Fifo (`DHDR_PRESENT_NO_TEARING`: no Immediate;
+//! A surface on the window (`DHDR_WINDOW_WIN32`: a = HWND, b = HINSTANCE; XLIB and WAYLAND on
+//! Linux; an ANativeWindow on Android), RGBA8Unorm required; present mode Immediate > Mailbox > Fifo (`DHDR_PRESENT_NO_TEARING`: no Immediate;
 //! `DHDR_PRESENT_VSYNC`: Fifo); desired maximum frame latency 1; alpha Opaque; usage
 //! RENDER_ATTACHMENT, plus COPY_SRC when the surface offers it (`DHDR_SURFACE_COPY_SRC`, for the
 //! test hook). Configured to the window's size, reconfigured when it changes or the frame is
@@ -96,11 +96,14 @@ fn write_pixels(gpu: &Gpu, texture: &wgpu::Texture, pixels: &[u32], w: u32, h: u
 impl Surface {
     /// `dhdr_surface_create`: present.wgsl's pipeline, then a surface on the Win32 window.
     pub fn create(gpu: &'static Gpu, window: &DhdrWindow, present_flags: u32) -> Result<Surface, String> {
-        if window.kind != DHDR_WINDOW_WIN32 && window.kind != DHDR_WINDOW_ANDROID {
-            return Err(format!("window kind {} is not supported", window.kind));
-        }
+        let surface = match window.kind {
+            DHDR_WINDOW_ANDROID => Self::android(gpu, window)?,
+            DHDR_WINDOW_WIN32 => Self::win32(gpu, window)?,
+            DHDR_WINDOW_XLIB => Self::xlib(gpu, window)?,
+            DHDR_WINDOW_WAYLAND => Self::wayland(gpu, window)?,
+            k => return Err(format!("window kind {k} is not supported")),
+        };
         let pipe = PresentPipe::create(gpu).ok_or("no present pipeline")?;
-        let surface = if window.kind == DHDR_WINDOW_ANDROID { Self::android(gpu, window)? } else { Self::win32(gpu, window)? };
         Self::from_wgpu(gpu, surface, present_flags, pipe)
     }
 
@@ -151,6 +154,60 @@ impl Surface {
     fn win32(gpu: &Gpu, window: &DhdrWindow) -> Result<wgpu::Surface<'static>, String> {
         let _ = (gpu, window);
         Err("no window surfaces in the browser (dhdr_web_surface)".into())
+    }
+
+    /// `DHDR_WINDOW_XLIB` (Linux, an X11 display): `a` = the Window (an XID Drawable, SDL gives
+    /// it as a pointer-sized c_ulong), `b` = the Display* of its connection (SDL's
+    /// SDL_PROP_WINDOW_X11_WINDOW / _DISPLAY pointers).
+    #[cfg(all(unix, not(target_os = "android")))]
+    fn xlib(gpu: &Gpu, window: &DhdrWindow) -> Result<wgpu::Surface<'static>, String> {
+        let display = std::ptr::NonNull::new(window.b as usize as *mut std::ffi::c_void).ok_or("NULL X11 Display")?;
+        if window.a == 0 {
+            return Err("X11 window is 0".into());
+        }
+        let handle = raw_window_handle::XlibWindowHandle::new(window.a as std::os::raw::c_ulong);
+        let display = raw_window_handle::XlibDisplayHandle::new(Some(display), 0);
+        // SAFETY: C keeps the window and the display alive until dhdr_surface_destroy (present.c
+        // destroys the surface before the window closes).
+        unsafe {
+            gpu.instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                raw_display_handle: Some(raw_window_handle::RawDisplayHandle::Xlib(display)),
+                raw_window_handle: raw_window_handle::RawWindowHandle::Xlib(handle),
+            })
+        }
+        .map_err(|e| format!("create_surface (X11): {e}"))
+    }
+
+    #[cfg(not(all(unix, not(target_os = "android"))))]
+    fn xlib(gpu: &Gpu, window: &DhdrWindow) -> Result<wgpu::Surface<'static>, String> {
+        let _ = (gpu, window);
+        Err("X11 windows are the Linux build's only".into())
+    }
+
+    /// `DHDR_WINDOW_WAYLAND` (Linux, a Wayland compositor): `a` = the wl_surface*, `b` = the
+    /// wl_display* (SDL's SDL_PROP_WINDOW_WAYLAND_SURFACE / _DISPLAY pointers); the Vulkan
+    /// surface holds its own reference to both.
+    #[cfg(all(unix, not(target_os = "android")))]
+    fn wayland(gpu: &Gpu, window: &DhdrWindow) -> Result<wgpu::Surface<'static>, String> {
+        use std::ptr::NonNull;
+        let display = NonNull::new(window.b as usize as *mut std::ffi::c_void).ok_or("NULL wl_display")?;
+        let surface_ptr = NonNull::new(window.a as usize as *mut std::ffi::c_void).ok_or("NULL wl_surface")?;
+        let display = raw_window_handle::WaylandDisplayHandle::new(display);
+        let handle = raw_window_handle::WaylandWindowHandle::new(surface_ptr);
+        // SAFETY: as xlib's above.
+        unsafe {
+            gpu.instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                raw_display_handle: Some(raw_window_handle::RawDisplayHandle::Wayland(display)),
+                raw_window_handle: raw_window_handle::RawWindowHandle::Wayland(handle),
+            })
+        }
+        .map_err(|e| format!("create_surface (Wayland): {e}"))
+    }
+
+    #[cfg(not(all(unix, not(target_os = "android"))))]
+    fn wayland(gpu: &Gpu, window: &DhdrWindow) -> Result<wgpu::Surface<'static>, String> {
+        let _ = (gpu, window);
+        Err("Wayland windows are the Linux build's only".into())
     }
 
     /// A surface over `surface` (the window's, or B1's OffscreenCanvas): checks the capabilities and

@@ -187,6 +187,10 @@ def linux_build():
     cmd += ['-D%s=%s' % kv for kv in sorted(OPTIONS.items())
             if kv[0] not in ('SDL_INSTALL', 'SDL_DISABLE_INSTALL', 'SDL_DISABLE_UNINSTALL',
                              'HAVE_DINPUT_H', 'HAVE_GAMEINPUT_H')]
+    # The X screen saver inhibitor alone has no Fedora -devel package preinstalled and the game
+    # calls no SDL screensaver function: build SDL3 without it (BSD/Linux screen-saver inhibit is
+    # a nice-to-have; Windows ships its compiled library).
+    cmd += ['-DSDL_X11_XSCRNSAVER=OFF']
     cmd += ['-DSDL_INSTALL=ON', '-DSDL_DISABLE_INSTALL=OFF', '-DSDL_DISABLE_UNINSTALL=OFF']
     for step in (cmd, ['cmake', '--build', str(bld)], ['cmake', '--install', str(bld)]):
         p = subprocess.run(step, capture_output=True, text=True)

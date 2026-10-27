@@ -33,7 +33,8 @@ from pathlib import Path
 TOOLS = Path(__file__).resolve().parent
 ROOT = TOOLS.parents[1]
 ALLOWED_LIBS_FILE = ROOT / 'port' / 'render' / 'native-static-libs-x86_64.txt'
-ALLOWED_LIBS_FILES = {'aarch64-linux-android': ROOT / 'port' / 'render' / 'native-static-libs-aarch64-linux-android.txt'}
+ALLOWED_LIBS_FILES = {'aarch64-linux-android': ROOT / 'port' / 'render' / 'native-static-libs-aarch64-linux-android.txt',
+                      'x86_64-unknown-linux-gnu': ROOT / 'port' / 'render' / 'native-static-libs-x86_64-unknown-linux-gnu.txt'}
 DYNAMIC_CRT = re.compile(rb'[/-]defaultlib:\s*"?msvcrt', re.I)
 SCN_CODE = 0x00000020
 SCN_EXECUTE = 0x20000000
