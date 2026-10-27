@@ -278,8 +278,7 @@ typedef struct Native {
     int quit, resize;
     NativeWindow window;
     float aspect;  /* the picture's shape in the window (DHD_ASPECT): width/height, 0 stretched, -1 its pixels */
-    float wide;    /* widescreen's shape, or 0: fields of 2D only (loading screens) are shown 4:3 */
-    unsigned flat_fields;            /* full-screen 2D fields in a row, up to the one shown */
+    float wide;    /* widescreen's shape, or 0 when disabled */
     /* DHD_SCALE: wide surfaces (frame and Z buffers) are drawn this many times larger; 0 until
        "match window" has seen the window. Narrow ones (the shadow and its blur) stay at 1x. */
     unsigned scale_setting, scale;
@@ -1826,16 +1825,10 @@ static void native_wanted(const NativeSurface *s, unsigned want[2])
 void pacing_handed(double *due, double *began);   /* port/hle/kernel.c, just-in-time frames */
 void pacing_present(double due, double began);
 
-/* Full-screen 2D cards keep their 4:3 shape after eight consecutive flat
-   fields. The EE supplies a state-specific limit with each queued field: the
-   goggles transition has more geometry than the later tiled card. Race, results
-   and countdown views never use a primitive-count heuristic. */
-#define NATIVE_FLAT_FIELDS 8
 int host_widescreen_flat_limit(void);  /* port/hle/widescreen.c */
 static void native_viewport(const Native *n, unsigned w, unsigned h, float *vw, float *vh)
 {
     float aspect = n->aspect < 0 ? (float)n->display_width / n->display_height : n->aspect;
-    if (n->wide && n->flat_fields >= NATIVE_FLAT_FIELDS && (aspect > 4.0f / 3 || aspect == 0)) aspect = 4.0f / 3;
     *vw = (float)w, *vh = (float)h;
     if (aspect > 0) {
         if (*vw > *vh * aspect) *vw = floorf(*vh * aspect + 0.5f);
@@ -1861,13 +1854,6 @@ static void native_prepare_surfaces(Native *n, const NativeFrame *f)
         }
     }
     for (unsigned i = 0; i < surfaces; i++) native_surface_resources(n, &n->surfaces[i], want[i]);
-}
-
-/* After a picture's scanout: whether it is a field of 2D only (widescreen shows those 4:3). */
-static void native_note_flat(Native *n, const NativeFrame *f)
-{
-    int flat = !f->path1 || (n->wide && f->path1 < f->flat_limit);
-    n->flat_fields = flat ? n->flat_fields + 1 : 0;
 }
 
 /* After a present: the counts and the time between presents. */

@@ -141,7 +141,6 @@ static void native_picture(Native *n, NativeFrame *f, const NativeVertex *vertic
         n->display_width = r.display_width; n->display_height = r.display_height;
         shown = r.shown != 0;
     }
-    native_note_flat(n, f);
     double encoded = spikes ? host_wall_seconds() : 0;
     if (n->trace_pictures) {   /* no GPU timestamps on WebGPU yet: gpu_ms -1 */
         fprintf(n->trace_pictures, "%llu,%.3f,%.3f,%.3f,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
@@ -150,12 +149,7 @@ static void native_picture(Native *n, NativeFrame *f, const NativeVertex *vertic
                 (unsigned long long)r.copies, (unsigned long long)r.copy_px, (unsigned long long)r.imports,
                 (unsigned long long)r.import_px);
     }
-    if (shown) {
-        float aspect = n->aspect;  /* a movie is a 4:3 picture, whatever shape the game has */
-        if (f->movie_on && aspect > 4.0f / 3) n->aspect = 4.0f / 3;
-        native_present(n);
-        n->aspect = aspect;
-    }
+    if (shown) native_present(n);  /* movies and loading cards honor the selected picture shape */
     if (spikes) {   /* the render thread's picture by part: surfaces, snapshot, draw, present */
         double end = host_wall_seconds();
         if (end - start >= 0.004)
