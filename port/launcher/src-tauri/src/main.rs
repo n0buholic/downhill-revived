@@ -31,6 +31,8 @@ struct App {
 #[derive(Serialize)]
 struct Snapshot {
     version: &'static str,
+    /// The game's binary name on this platform (dhd.exe / dhd), for the messages that name it.
+    game: &'static str,
     settings: BTreeMap<String, String>,
     game_found: bool,
     running: bool,
@@ -78,6 +80,7 @@ fn snapshot(app: State<App>) -> Snapshot {
         .unwrap_or_else(|| app.dir.join("textures").join("SCUS-97177").join("replacements"));
     Snapshot {
         version: VERSION,
+        game: game::GAME_EXE,
         disc_problem: iso.and_then(|p| disc::problem(std::path::Path::new(p))),
         texture_pack: std::fs::read_dir(pack).is_ok_and(|mut d| d.next().is_some()),
         game_found: game::exe(&app.dir).is_file(),
@@ -143,7 +146,7 @@ fn play(handle: AppHandle, app: State<App>) -> Result<(), String> {
     let child = game::start(&app.dir).map_err(|e| format!("can't start {}: {e}", game::GAME_EXE))?;
     *slot = Some(child);
     if let Some(w) = handle.get_webview_window("main") {
-        let _ = w.minimize();
+        let _ = w.hide();
     }
     let h = handle.clone();
     std::thread::spawn(move || loop {
@@ -160,6 +163,7 @@ fn play(handle: AppHandle, app: State<App>) -> Result<(), String> {
         let code = status.and_then(game::exit_code);
         let _ = h.emit("game-exited", Exited { code, wants_update: code == Some(game::UPDATE_EXIT_CODE) });
         if let Some(w) = h.get_webview_window("main") {
+            let _ = w.show();
             let _ = w.unminimize();
             let _ = w.set_focus();
         }
@@ -230,6 +234,18 @@ fn open_link(handle: AppHandle, url: String) -> Result<(), String> {
 }
 
 fn main() {
+    // GTK's Wayland dispatch can end in "protocol error 71" with this no-decoration window
+    // (tao, finding 098): prefer X11 (XWayland) unless the player chose a backend themselves.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("GDK_BACKEND").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        std::env::set_var("GDK_BACKEND", "x11");
+    }
+    // WebKitGTK's dmabuf renderer goes blank ("Failed to create GBM buffer") on some driver
+    // stacks (WebKitGTK 2.44, finding 098): fall back to its plain renderer for the webview.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
     let dir = game::dir();
     update::clean_up(&dir);
     tauri::Builder::default()

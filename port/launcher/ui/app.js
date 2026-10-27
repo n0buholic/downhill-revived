@@ -47,7 +47,7 @@ const TABS = [
     { key: 'unlock_all', label: 'Unlock All', hint: 'Every track, rider, bike and shop item; your save is not changed', type: 'switch', on: '1', off: '0' },
     { key: 'auto_update', label: 'Updates', hint: 'Online races need the newest version', type: 'seg',
       options: [['ask', 'Ask'], ['on', 'Automatic'], ['off', 'Off']] },
-    { key: 'launcher', label: 'Open the launcher first', hint: 'Off: dhd.exe starts the game straight away', type: 'switch', on: 'on', off: 'off' },
+    { key: 'launcher', label: 'Open the launcher first', hint: 'Off: starting the game skips this launcher', type: 'switch', on: 'on', off: 'off' },
   ]],
   ['Online', [
     { key: 'name', label: 'Rider name', hint: 'Shown over your rider in online races. Up to 12 letters, digits, spaces or dashes.', type: 'name' },
@@ -436,7 +436,7 @@ function renderFooter() {
     return setSecondary('Close game', () => { state.confirmClose = true; renderFooter(); });
   }
   if (!state.gameFound) {
-    status('bad', 'i-alert', 'dhd.exe isn\'t in this folder. Unzip the whole release together.');
+    status('bad', 'i-alert', `${state.game} isn't in this folder. Unzip the whole release together.`);
     setSecondary([icon('i-folder'), 'Open folder'], () => invoke('open_folder').catch((e) => fail(String(e))), true);
     return setPrimary({ ...playNow, disabled: true });
   }
@@ -565,6 +565,7 @@ async function start() {
   state.version = snap.version;
   state.settings = snap.settings;
   state.gameFound = snap.game_found;
+  state.game = snap.game;
   state.running = snap.running;
   state.discProblem = snap.disc_problem;
   state.texturePack = snap.texture_pack;
